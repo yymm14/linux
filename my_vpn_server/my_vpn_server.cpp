@@ -14,9 +14,11 @@
 #include <fcntl.h>
 #include <iostream>
 #include <cstring>
+#include <netdb.h>
+#include <thread>
 
 #ifdef __linux__
-#define PORT 22
+#define PORT 8000
 
 // There are several ways to play with this program. Here we just give an
 // example for the simplest scenario. Let us say that a Linux box has a
@@ -107,18 +109,78 @@ int main() {
             close(server_fd);
             exit(EXIT_FAILURE);
         }
+        std::cout << "Connection accepted: " << inet_ntoa(address.sin_addr) << std::endl;
 
-        // メッセージの読み取り
-        read(new_socket, buffer, 1024);
-        std::cout << "Message received: " << buffer << std::endl;
+        // 各クライアントを新しいスレッドで処理
+        std::thread client_thread(handle_client, new_socket);
+        client_thread.detach();
+        // VPNトンネルを確立し、クライアントのトラフィックを処理
+        // 詳細なインターネットトラフィックの送受信処理をここに追加
+        // クライアントのリクエストを処理
+        while (true) {
+            memset(buffer, 0, 1024);
+            int bytes_read = read(new_socket, buffer, 1024);
+            if (bytes_read == 0) {
+                // クライアントが接続を終了した場合
+                std::cout << "Client disconnected" << std::endl;
+                break;
+            }
+            // // メッセージの読み取り
+            // read(new_socket, buffer, 1024);
+            // std::cout << "Message received: " << buffer << std::endl;
+            // データの受信と転送
+            read(new_socket, buffer, 1024);
+            std::cout << "Received data: " << buffer << std::endl;
+            // インターネットに転送するソケットを設定
+            int internet_socket = socket(AF_INET, SOCK_STREAM, 0);
+            if (internet_socket == -1) {
+                perror("socket failed");
+                close(new_socket);
+                continue;
+            }
+            struct sockaddr_in internet_address;
+            memset(&internet_address, 0, sizeof(internet_address));
+            internet_address.sin_family = AF_INET;
+            internet_address.sin_port = htons(80); // HTTPポート
 
-        // メッセージの返信
-        const char *message = "Message received";
-        send(new_socket, message, strlen(message), 0);
+            // ホスト名の解決
+            struct hostent *server = gethostbyname("www.example.com");
+            if (server == NULL) {
+                perror("no such host");
+                close(new_socket);
+                close(internet_socket);
+                continue;
+            }
+            memcpy(&internet_address.sin_addr.s_addr, server->h_addr, server->h_length);
+
+            if (connect(internet_socket, (struct sockaddr *)&internet_address, sizeof(internet_address)) < 0) {
+                perror("connect failed");
+                close(new_socket);
+                close(internet_socket);
+                continue;
+            }
+            // クライアントから受け取ったデータをインターネットに送信
+            send(internet_socket, buffer, strlen(buffer), 0);
+            // インターネットからの応答をクライアントに転送
+            memset(buffer, 0, sizeof(buffer));
+            read(internet_socket, buffer, 1024);
+            send(new_socket, buffer, strlen(buffer), 0);
+
+            std::cout << "Received: " << buffer << std::endl;
+
+            // 返信の送信（サンプル）
+            const char *response = "Request processed";
+            send(new_socket, response, strlen(response), 0);
+        }
+
+        
+        // // メッセージの返信
+        // const char *message = "Message received";
+        // send(new_socket, message, strlen(message), 0);
 
         close(new_socket);
     }
-
+    close(server_fd);
     return 0;
 }
 
