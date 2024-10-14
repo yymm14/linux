@@ -16,6 +16,8 @@
 #include <cstring>
 #include <netdb.h>
 #include <thread>
+#include <vector>
+#include <regex>
 
 #ifdef __linux__
 #define PORT 8000
@@ -76,11 +78,13 @@ int main() {
     int server_fd, new_socket;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    char buffer[1024] = {0};
 
     // ソケットの作成
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    //server_fdは、待機中の接続要求を受け付けるためのソケットディスクリプタ
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket failed");
+        close(server_fd);
+        //プログラムを終了しEXIT_FAILUREを返す．これによりプログラムの実行が強制的に中断
         exit(EXIT_FAILURE);
     }
     // アドレスの設定
@@ -104,6 +108,9 @@ int main() {
         std::cout << "Waiting for connections..." << std::endl;
 
         // 接続を受け入れる
+        //accept関数は、待機中の接続要求を受け入れて、その接続のための新しいソケットを作成します
+        //addressは、接続元のアドレス情報
+        //addrlenは、アドレス構造体のサイズを指定
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
             perror("accept");
             close(server_fd);
@@ -114,74 +121,112 @@ int main() {
         // 各クライアントを新しいスレッドで処理
         std::thread client_thread(handle_client, new_socket);
         client_thread.detach();
-        // VPNトンネルを確立し、クライアントのトラフィックを処理
-        // 詳細なインターネットトラフィックの送受信処理をここに追加
-        // クライアントのリクエストを処理
-        while (true) {
-            memset(buffer, 0, 1024);
-            int bytes_read = read(new_socket, buffer, 1024);
-            if (bytes_read == 0) {
-                // クライアントが接続を終了した場合
-                std::cout << "Client disconnected" << std::endl;
-                break;
-            }
-            // // メッセージの読み取り
-            // read(new_socket, buffer, 1024);
-            // std::cout << "Message received: " << buffer << std::endl;
-            // データの受信と転送
-            read(new_socket, buffer, 1024);
-            std::cout << "Received data: " << buffer << std::endl;
-            // インターネットに転送するソケットを設定
-            int internet_socket = socket(AF_INET, SOCK_STREAM, 0);
-            if (internet_socket == -1) {
-                perror("socket failed");
-                close(new_socket);
-                continue;
-            }
-            struct sockaddr_in internet_address;
-            memset(&internet_address, 0, sizeof(internet_address));
-            internet_address.sin_family = AF_INET;
-            internet_address.sin_port = htons(80); // HTTPポート
-
-            // ホスト名の解決
-            struct hostent *server = gethostbyname("www.example.com");
-            if (server == NULL) {
-                perror("no such host");
-                close(new_socket);
-                close(internet_socket);
-                continue;
-            }
-            memcpy(&internet_address.sin_addr.s_addr, server->h_addr, server->h_length);
-
-            if (connect(internet_socket, (struct sockaddr *)&internet_address, sizeof(internet_address)) < 0) {
-                perror("connect failed");
-                close(new_socket);
-                close(internet_socket);
-                continue;
-            }
-            // クライアントから受け取ったデータをインターネットに送信
-            send(internet_socket, buffer, strlen(buffer), 0);
-            // インターネットからの応答をクライアントに転送
-            memset(buffer, 0, sizeof(buffer));
-            read(internet_socket, buffer, 1024);
-            send(new_socket, buffer, strlen(buffer), 0);
-
-            std::cout << "Received: " << buffer << std::endl;
-
-            // 返信の送信（サンプル）
-            const char *response = "Request processed";
-            send(new_socket, response, strlen(response), 0);
-        }
-
+        //ここからhandle_client
         
         // // メッセージの返信
         // const char *message = "Message received";
         // send(new_socket, message, strlen(message), 0);
-
-        close(new_socket);
     }
+    close(new_socket);
     close(server_fd);
     return 0;
+}
+void handle_client(int new_socket) {
+    char buffer[4096] = {0};
+    // VPNトンネルを確立し、クライアントのトラフィックを処理
+    // 詳細なインターネットトラフィックの送受信処理をここに追加
+    // クライアントのリクエストを処理
+    while (true) {
+        //bufferをゼロで初期化
+        memset(buffer, 0, 4096);
+        //new_socketから最大4096バイトのデータをbufferに読み取る
+        //bufferには読み取ったデータが直接格納され、bytes_read にはそのデータの長さが格納される
+        int bytes_read = read(new_socket, buffer, 4096);
+        if (bytes_read == 0) {
+            // クライアントが接続を終了した合図
+            std::cout << "Client disconnected" << std::endl;
+            break;
+            //接続終了したのでブレイクでいい
+        }
+        // データの受信と転送
+        //read(new_socket, buffer, 1024);
+        //std::cout << "Received data: " << buffer << std::endl;
+        // インターネットに転送するソケットを設定
+        int internet_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (internet_socket == -1) {
+            perror("socket failed");
+            continue;
+            //これを失敗した場合はコンテニューでいい
+        }
+        //sockaddr_in構造体は、IPv4アドレスとポート番号を格納するための構造体
+        struct sockaddr_in internet_address;
+        //構造体 internet_address をゼロで初期化
+        memset(&internet_address, 0, sizeof(internet_address));
+        //sin_familyフィールド
+        internet_address.sin_family = AF_INET;
+        //sin_portフィールド
+        //htons関数はホストバイトオーダーをネットワークバイトオーダーに変換
+        //ポート番号がネットワークで正しく解釈
+        internet_address.sin_port = htons(80); // HTTPポート
+        //正規表現パターンを定義
+        // リクエストからホスト名を抽出
+        // std::string request(buffer);
+        // std::vector<std::regex> host_regex_patterns = {
+        //     std::regex("Host: (.*?)\\r\\n"),                    // HTTP/HTTPS
+        //     std::regex("MAIL FROM:<(.*?)>"),                    // SMTP
+        //     std::regex("IMAP.*Server: (.*?)\\r\\n"),            // IMAP
+        //     std::regex("rtmp://(.*?)/")                         // RTMP
+        // };
+        // std::string host_name;
+        // //パターン全部を試したら終了する
+        // for (const auto& host_regex : host_regex_patterns) {
+        //     std::smatch match;
+        //     if (std::regex_search(request, match, host_regex) && match.size() > 1) {
+        //         //一致が見つかった場合（match.size() > 1）、host_nameに抽出したホスト名（match.str(1)）を格納
+        //         host_name = match.str(1);
+        //         break;
+        //     }
+        // }
+        // if (host_name.empty()) {
+        //     host_name = "www.example.com";
+        // }
+        // // ホスト名の解決
+        // struct hostent *server = gethostbyname(host_name.c_str());
+        // if (server == NULL) {
+        //     perror("no such host");
+        //     continue;
+        // }
+        // //DNS解決により取得されたサーバーのIPアドレス情報をinternet_address構造体のsin_addr.s_addrフィールドにコピー
+        //server->h_addrは、DNS解決により取得されたIPアドレスの先頭アドレス
+        //server->h_lengthは、IPアドレスの長さ
+        memcpy(&internet_address.sin_addr.s_addr, server->h_addr, server->h_length);
+        //connect関数を使って、internet_socketを使いinternet_addressで指定されたサーバーに接続
+        if (connect(internet_socket, (struct sockaddr *)&internet_address, sizeof(internet_address)) < 0) {
+            perror("connect failed");
+            continue;
+        }
+        // クライアントから受け取ったデータをインターネットに送信
+        send(internet_socket, buffer, strlen(buffer), 0);
+        // インターネットからの応答をクライアントに転送
+        while (true) {
+            //バッファを初期化
+            memset(buffer, 0, sizeof(buffer));
+            //インターネットからデータを読み込む
+            int bytes_received = read(internet_socket, buffer, sizeof(buffer));
+            // エラーまたは接続が閉じられた合図
+            if (bytes_received <= 0) {
+                break; 
+            }
+            //そうでない場合、読み取ったデータをクライアントに送信
+            send(new_socket, buffer, bytes_received, 0);
+        }
+        std::cout << "Received: " << buffer << std::endl;
+        // 返信の送信（サンプル）
+        const char *response = "Request processed";
+    }
+    
+
+    close(new_socket);
 }
 
 // static int get_tunnel(char *port, char *secret)
