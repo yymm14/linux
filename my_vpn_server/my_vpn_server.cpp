@@ -74,6 +74,8 @@
 
 #endif
 
+void handle_client(int client_socket); // 関数の宣言
+
 int main() {
     int server_fd, new_socket;
     struct sockaddr_in address;
@@ -118,11 +120,10 @@ int main() {
         }
         std::cout << "Connection accepted: " << inet_ntoa(address.sin_addr) << std::endl;
 
-        // 各クライアントを新しいスレッドで処理
+        // handle_client関数を新しいスレッドで実行しその引数としてnew_socketを渡す
         std::thread client_thread(handle_client, new_socket);
+        //新しいスレッドをデタッチ
         client_thread.detach();
-        //ここからhandle_client
-        
         // // メッセージの返信
         // const char *message = "Message received";
         // send(new_socket, message, strlen(message), 0);
@@ -137,6 +138,7 @@ void handle_client(int new_socket) {
     // 詳細なインターネットトラフィックの送受信処理をここに追加
     // クライアントのリクエストを処理
     while (true) {
+        std::cout << "Handle client..." << std::endl;
         //bufferをゼロで初期化
         memset(buffer, 0, 4096);
         //new_socketから最大4096バイトのデータをbufferに読み取る
@@ -168,61 +170,65 @@ void handle_client(int new_socket) {
         //htons関数はホストバイトオーダーをネットワークバイトオーダーに変換
         //ポート番号がネットワークで正しく解釈
         internet_address.sin_port = htons(80); // HTTPポート
+        //リクエストにはIPアドレスでなくホスト名が含まれている
         //正規表現パターンを定義
         // リクエストからホスト名を抽出
-        // std::string request(buffer);
-        // std::vector<std::regex> host_regex_patterns = {
-        //     std::regex("Host: (.*?)\\r\\n"),                    // HTTP/HTTPS
-        //     std::regex("MAIL FROM:<(.*?)>"),                    // SMTP
-        //     std::regex("IMAP.*Server: (.*?)\\r\\n"),            // IMAP
-        //     std::regex("rtmp://(.*?)/")                         // RTMP
-        // };
-        // std::string host_name;
-        // //パターン全部を試したら終了する
-        // for (const auto& host_regex : host_regex_patterns) {
-        //     std::smatch match;
-        //     if (std::regex_search(request, match, host_regex) && match.size() > 1) {
-        //         //一致が見つかった場合（match.size() > 1）、host_nameに抽出したホスト名（match.str(1)）を格納
-        //         host_name = match.str(1);
-        //         break;
-        //     }
-        // }
-        // if (host_name.empty()) {
-        //     host_name = "www.example.com";
-        // }
-        // // ホスト名の解決
-        // struct hostent *server = gethostbyname(host_name.c_str());
-        // if (server == NULL) {
-        //     perror("no such host");
-        //     continue;
-        // }
-        // //DNS解決により取得されたサーバーのIPアドレス情報をinternet_address構造体のsin_addr.s_addrフィールドにコピー
-        //server->h_addrは、DNS解決により取得されたIPアドレスの先頭アドレス
+        std::string request(buffer);
+        std::vector<std::regex> host_regex_patterns = {
+            std::regex("Host: (.*?)\\r\\n"),                    // HTTP/HTTPS
+            std::regex("MAIL FROM:<(.*?)>"),                    // SMTP
+            std::regex("IMAP.*Server: (.*?)\\r\\n"),            // IMAP
+            std::regex("rtmp://(.*?)/")                         // RTMP
+        };
+        std::string host_name;
+        //パターン全部を試したら終了する
+        for (const auto& host_regex : host_regex_patterns) {
+            std::smatch match;
+            if (std::regex_search(request, match, host_regex) && match.size() > 1) {
+                //一致が見つかった場合（match.size() > 1）、host_nameに抽出したホスト名（match.str(1)）を格納
+                host_name = match.str(1);
+                break;
+            }
+        }
+        if (host_name.empty()) {
+            host_name = "www.example.com";
+        }
+        // ホスト名の解決
+        struct hostent *server = gethostbyname(host_name.c_str());
+        if (server == NULL) {
+            perror("no such host");
+            continue;
+        }
+        //DNS解決により取得されたサーバーのIPアドレス情報をinternet_address構造体のsin_addr.s_addrフィールドにコピー
+        //server->h_addrは、DNS解決（gethostbyname関数）により取得されたIPアドレスの先頭アドレス
         //server->h_lengthは、IPアドレスの長さ
         memcpy(&internet_address.sin_addr.s_addr, server->h_addr, server->h_length);
-        //connect関数を使って、internet_socketを使いinternet_addressで指定されたサーバーに接続
+        //connect関数によりinternet_socketは指定されたinternet_addressのサーバーに接続
         if (connect(internet_socket, (struct sockaddr *)&internet_address, sizeof(internet_address)) < 0) {
             perror("connect failed");
             continue;
         }
         // クライアントから受け取ったデータをインターネットに送信
+        //internet_socketに対してデータを送信
         send(internet_socket, buffer, strlen(buffer), 0);
+        //応答データはネットワークスタックに溜まる
         // インターネットからの応答をクライアントに転送
         while (true) {
+            std::cout << "Received from internet..." << std::endl;
             //バッファを初期化
             memset(buffer, 0, sizeof(buffer));
-            //インターネットからデータを読み込む
+            //internet_socketからbufferにデータを読み込む
             int bytes_received = read(internet_socket, buffer, sizeof(buffer));
             // エラーまたは接続が閉じられた合図
             if (bytes_received <= 0) {
                 break; 
             }
+            std::cout << "Data received (" << bytes_received << " bytes): " 
+          << std::string(buffer, std::min(bytes_received, 100)) << "..." << std::endl;
             //そうでない場合、読み取ったデータをクライアントに送信
+            //new_socketが指す接続先にデータが送信
             send(new_socket, buffer, bytes_received, 0);
         }
-        std::cout << "Received: " << buffer << std::endl;
-        // 返信の送信（サンプル）
-        const char *response = "Request processed";
     }
     
 
